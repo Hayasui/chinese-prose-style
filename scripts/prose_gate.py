@@ -15,8 +15,7 @@
         顿号（「第 1、3、5 场」）不计，加 --strict 才算不通过
 
 只扫散文行：表格、标题、表题与图题、图片、代码块、frontmatter、引用块、带
-`<!-- prose-gate: skip -->` 的行都不进扫描。首几行带 `<!-- prose-gate: skip-list-ratio -->`
-的整份稿不判加粗分条占比，那是给清单体的提纲源稿用的。范围的依据是主规程第 4 节与第 7.1 节。
+`<!-- prose-gate: skip -->` 的行都不进扫描。范围的依据是主规程第 4 节与第 7.1 节。
 
 用法：
     python scripts/prose_gate.py 稿件.md [更多稿件.md ...]
@@ -33,7 +32,6 @@ import re
 import sys
 
 SKIP_MARKER = "<!-- prose-gate: skip -->"
-SKIP_LIST_RATIO = "<!-- prose-gate: skip-list-ratio -->"
 CAPTION = re.compile(r"^附?[表图]\s*[0-9A-Z]")
 BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*")
 BOLD_LABEL = re.compile(r"^(?:[-*+]\s+|\d+\.\s+)?\*\*[^*]+\*\*\s*[：:]")
@@ -279,25 +277,6 @@ def show(rows, fmt, limit):
         print(f"      ……另有 {len(rows) - limit} 处，用 --list 调大")
 
 
-def has_body_marker(path, marker, within=3):
-    """首几行里带某个整份稿生效的标记，就认。"""
-    try:
-        with open(path, encoding="utf-8-sig") as fh:
-            head = [ln.strip() for ln, _ in zip(fh, range(within * 4))]
-    except OSError:
-        return False
-    seen = 0
-    for line in head:
-        if not line:
-            continue
-        seen += 1
-        if marker in line:
-            return True
-        if seen >= within:
-            break
-    return False
-
-
 def report(path, args):
     try:
         items = classify(path, include_captions=args.include_captions)
@@ -309,9 +288,6 @@ def report(path, args):
     total_lines = sum(1 for _, s, _ in items if s)
     hard, soft = check_leads(items)
     lr_hits, lr_total, lr_ratio = check_list_ratio(items, args.list_ratio)
-    lr_off = has_body_marker(path, SKIP_LIST_RATIO)
-    if lr_off:
-        lr_hits = []
     bad, total, raw_max = check_sentences(items, args.max_len)
     clauses, clause_total = check_clauses(items, args.max_clause_len)
     tele = check_telegraph(items)
@@ -335,11 +311,8 @@ def report(path, args):
     print(f"  A  段首整句判词（>=18 字）{len(hard)} 处"
           + ("　← 不通过" if hard else "　过"))
     print(f"  A′ 8–17 字段首（软，--strict 才算不通过）{len(soft)} 处")
-    if lr_off:
-        print(f"  A-ListRatio  已按首行标记豁免（占散文行 {lr_ratio:.0%}）")
-    else:
-        print(f"  A-ListRatio  加粗小标题加冒号的行 {len(lr_hits)} 行"
-              f"（占散文行 {lr_ratio:.0%}，阈值 {args.list_ratio:.0%}；软）")
+    print(f"  A-ListRatio  加粗小标题加冒号的行 {len(lr_hits)} 行"
+          f"（占散文行 {lr_ratio:.0%}，阈值 {args.list_ratio:.0%}；软）")
     print(f"  B  超过 {args.max_len} 字的句子 {len(bad)} 句"
           + ("　← 不通过" if bad else "　过")
           + f"（含括号最长为 {raw_max} 字）")
@@ -372,10 +345,7 @@ def report(path, args):
     if enum:
         print("  段内报菜名：")
         show(enum, lambda r: f"第 {r[0]} 行 [{r[2]} 个顿号] {r[1][:70]}…", min(args.list, 5))
-        print("  两步判定（逐条过，见主规程 7.2 的断言 D）："
-              "①把顿号换成「或」，条件与后果都不变的，是并列可任一触发，留作一句；"
-              "②换成「或」会改变意思的，看每项是不是五字以内的单纯标签，"
-              "带附加说明就归并成上位类别或做表。")
+        print("  判定办法见主规程 7.2 的断言 D。")
     print(f"  结论：{'不通过' if failed else '通过'}")
     return failed
 
