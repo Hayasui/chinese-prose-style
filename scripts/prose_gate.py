@@ -7,15 +7,16 @@
     A-ListRatio  加粗小标题加冒号开头的行占散文行的比例超过 --list-ratio（默认 35%），
                  报「疑似全篇列表化」，加 --strict 才算不通过
     B   一句不超过四十五字（去掉全角括号内内容后仍超过 --max-len）
-    B′  单个分句不超过二十四字（去掉括号后按，；：切开逐段核），
-        加 --strict 才算不通过
+    B′  单个分句不超过二十四字（去掉括号后按，；：、与破折号切开逐段核；
+        引号、书名号、代码框与文件名各折算成一个方框），加 --strict 才算不通过
     C   段落不许切成电报碎句（三句以上段落里，短于 18 字的句子达三句且占比超过
         60%，或连续三句短于 16 字）
     D   单句内不许暗中报菜名（去掉括号后顿号达 3 处及以上）；纯数字编号之间的
         顿号（「第 1、3、5 场」）不计，加 --strict 才算不通过
 
 只扫散文行：表格、标题、表题与图题、图片、代码块、frontmatter、引用块、带
-`<!-- prose-gate: skip -->` 的行都不进扫描。范围的依据是主规程第 4 节与第 7.1 节。
+`<!-- prose-gate: skip -->` 的行都不进扫描。首几行带 `<!-- prose-gate: skip-list-ratio -->`
+的整份稿不判加粗分条占比，那是给清单体的提纲源稿用的。范围的依据是主规程第 4 节与第 7.1 节。
 
 用法：
     python scripts/prose_gate.py 稿件.md [更多稿件.md ...]
@@ -32,6 +33,7 @@ import re
 import sys
 
 SKIP_MARKER = "<!-- prose-gate: skip -->"
+SKIP_LIST_RATIO = "<!-- prose-gate: skip-list-ratio -->"
 CAPTION = re.compile(r"^附?[表图]\s*[0-9A-Z]")
 BOLD_LEAD = re.compile(r"^\*\*(.+?)\*\*")
 BOLD_LABEL = re.compile(r"^(?:[-*+]\s+|\d+\.\s+)?\*\*[^*]+\*\*\s*[：:]")
@@ -39,7 +41,17 @@ INLINE_IMG = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 INLINE_CODE = re.compile(r"`([^`]*)`")
 PARENS = re.compile(r"[（(][^（）()]*[）)]")
 SENT_SPLIT = re.compile(r"[。！？]")
-CLAUSE_SPLIT = re.compile(r"[，；：]")
+CLAUSE_SPLIT = re.compile(r"[，；：、]|——")
+# 成串的引文折算成一个方框：引号、书名号、代码框里的字串，以及文件名。
+# 读者把它们当一个名词看，不该按字数论长短，也不该让里面的顿号把分句切开。
+FOLDED = "▢"
+SPANS = re.compile(
+    r"[「『][^」』]*[」』]|《[^》]*》|`[^`]*`|<!--.*?-->"
+)
+FILENAME = re.compile(
+    r"[A-Za-z0-9_./\\-]+\.(?:md|markdown|py|json|ya?ml|docx?|xlsx?|csv|tsv|txt|pdf|png|jpe?g|html?)"
+    r"(?:[A-Za-z0-9_.-]*)?"
+)
 
 # 计数时去掉的标点与符号；中文、西文字母与数字各算一个
 PUNCT = set(
@@ -77,11 +89,28 @@ def clean_line(s):
     return t.replace("**", "").replace("`", "")
 
 
+def fold_spans(s):
+    """把引号、书名号、代码框里的字串与文件名各折成一个方框。
+
+    读者把它们当一个名词看，不该按字数论长短，也不该让引文里的顿号
+    把分句切开——报菜名的顿号在正文里，不在引文里。
+    """
+    return FILENAME.sub(FOLDED, SPANS.sub(FOLDED, s))
+
+
+def prep_clause_line(s):
+    """分句判定用的行：先去图片，再把引文与文件名折成方框，最后去掉加粗标记。
+
+    折一步要在去掉反引号之前做，否则代码框里的字串认不出来。
+    """
+    return fold_spans(INLINE_IMG.sub("", s)).replace("**", "")
+
+
 def sentences(s):
-    """按句号、问号、叹号切句，去掉空段与只剩强调符号的碎段。"""
+    """按句号、问号、叹号切句，保留句末标点，去掉空段与只剩强调符号的碎段。"""
     out = []
-    for x in SENT_SPLIT.split(s):
-        x = x.strip().strip("*_~").strip()
+    for m in re.finditer(r"[^。！？]+[。！？]?", s):
+        x = m.group(0).strip().strip("*_~").strip()
         if x and text_len(x) > 0:
             out.append(x)
     return out
@@ -176,13 +205,17 @@ def check_sentences(items, max_len):
 
 
 def check_clauses(items, max_clause):
-    """断言 B 的分句线。返回 (超长分句, 分句总数)。"""
+    """断言 B′。返回 (超长分句, 分句总数)。
+
+    切开的口径见主规程第 7.2 节：逗号、分号、冒号、顿号与破折号都算停顿，
+    引文与文件名先折成一个方框再数。
+    """
     bad = []
     total = 0
     for ln, s, kind in items:
         if kind != "prose":
             continue
-        for sent in sentences(clean_line(s)):
+        for sent in sentences(prep_clause_line(s)):
             for clause in CLAUSE_SPLIT.split(drop_parens(sent)):
                 clause = clause.strip()
                 if not clause:
@@ -198,14 +231,17 @@ def check_telegraph(items):
     """断言 C。返回 [(行号, 句数, 短句占比, 最长短句连击, 该行首句)]。
 
     短句要成串才算电报腔：短句不足三句、或只是两三句里夹一句长的，
-    不算——执行材料里的现场指令本来就这么短。
+    不算——执行材料里的现场指令本来就这么短。整行都是问句的核对清单
+    也不判，那是清单的形态，不是段落的形态。
     """
     hits = []
     for ln, s, kind in items:
         if kind != "prose":
             continue
-        sents = sentences(clean_line(s))
+        sents = [x for x in sentences(clean_line(s)) if text_len(drop_parens(x)) > 0]
         if len(sents) < MIN_SENTS_PER_PARA:
+            continue
+        if all(x.endswith("？") for x in sents):
             continue
         lens = [text_len(drop_parens(x)) for x in sents]
         short = [n for n in lens if n < SHORT_SENT]
@@ -243,6 +279,25 @@ def show(rows, fmt, limit):
         print(f"      ……另有 {len(rows) - limit} 处，用 --list 调大")
 
 
+def has_body_marker(path, marker, within=3):
+    """首几行里带某个整份稿生效的标记，就认。"""
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            head = [ln.strip() for ln, _ in zip(fh, range(within * 4))]
+    except OSError:
+        return False
+    seen = 0
+    for line in head:
+        if not line:
+            continue
+        seen += 1
+        if marker in line:
+            return True
+        if seen >= within:
+            break
+    return False
+
+
 def report(path, args):
     try:
         items = classify(path, include_captions=args.include_captions)
@@ -254,6 +309,9 @@ def report(path, args):
     total_lines = sum(1 for _, s, _ in items if s)
     hard, soft = check_leads(items)
     lr_hits, lr_total, lr_ratio = check_list_ratio(items, args.list_ratio)
+    lr_off = has_body_marker(path, SKIP_LIST_RATIO)
+    if lr_off:
+        lr_hits = []
     bad, total, raw_max = check_sentences(items, args.max_len)
     clauses, clause_total = check_clauses(items, args.max_clause_len)
     tele = check_telegraph(items)
@@ -277,8 +335,11 @@ def report(path, args):
     print(f"  A  段首整句判词（>=18 字）{len(hard)} 处"
           + ("　← 不通过" if hard else "　过"))
     print(f"  A′ 8–17 字段首（软，--strict 才算不通过）{len(soft)} 处")
-    print(f"  A-ListRatio  加粗小标题加冒号的行 {len(lr_hits)} 行"
-          f"（占散文行 {lr_ratio:.0%}，阈值 {args.list_ratio:.0%}；软）")
+    if lr_off:
+        print(f"  A-ListRatio  已按首行标记豁免（占散文行 {lr_ratio:.0%}）")
+    else:
+        print(f"  A-ListRatio  加粗小标题加冒号的行 {len(lr_hits)} 行"
+              f"（占散文行 {lr_ratio:.0%}，阈值 {args.list_ratio:.0%}；软）")
     print(f"  B  超过 {args.max_len} 字的句子 {len(bad)} 句"
           + ("　← 不通过" if bad else "　过")
           + f"（含括号最长为 {raw_max} 字）")
@@ -311,6 +372,10 @@ def report(path, args):
     if enum:
         print("  段内报菜名：")
         show(enum, lambda r: f"第 {r[0]} 行 [{r[2]} 个顿号] {r[1][:70]}…", min(args.list, 5))
+        print("  两步判定（逐条过，见主规程 7.2 的断言 D）："
+              "①把顿号换成「或」，条件与后果都不变的，是并列可任一触发，留作一句；"
+              "②换成「或」会改变意思的，看每项是不是五字以内的单纯标签，"
+              "带附加说明就归并成上位类别或做表。")
     print(f"  结论：{'不通过' if failed else '通过'}")
     return failed
 
@@ -324,7 +389,7 @@ def main(argv=None):
     ap.add_argument("--list-ratio", type=float, default=0.35,
                     help="加粗分条占散文行的比例上限，默认 0.35（软命中）")
     ap.add_argument("--strict", action="store_true",
-                    help="把软命中（A′、A-ListRatio、B′）也算不通过")
+                    help="把软命中（A′、A-ListRatio、B′、D）也算不通过")
     ap.add_argument("--list", type=int, default=10, help="每类列出多少处，默认 10")
     ap.add_argument("--include-captions", action="store_true",
                     help="把表题与图题也当散文扫（默认不扫）")
